@@ -9,7 +9,12 @@ import java.nio.{ByteBuffer, ByteOrder}
 class ModelServer(port: Int,imageFoldPath: String) {
   val server = ServerSocketChannel.open().bind(new InetSocketAddress(9000))
 
+  val faces = Array("front","side1","back","side2")
+
   var imagedir = "";
+
+  var imageFaceSizes: Array[Int] = null
+
   /**
     * try to run the server
     */
@@ -26,7 +31,8 @@ class ModelServer(port: Int,imageFoldPath: String) {
   }
 
   /**
-    * create the dir for store the image
+    * create the dir for store the image and four sub folder to store front
+    * side1 back side2s
     * @return the image dir to store
     */
   private def createFold() = {
@@ -40,6 +46,10 @@ class ModelServer(port: Int,imageFoldPath: String) {
     val imagePath = path.resolve(time)
     if(!Files.exists(imagePath))
       Files.createDirectories(imagePath)
+
+    // create four sub folder to store different side image
+    faces.foreach(face => Files.createDirectories(imagePath.resolve(face)))
+
     imagedir = imagePath.toString
   }
 
@@ -55,20 +65,74 @@ class ModelServer(port: Int,imageFoldPath: String) {
     * use the image to build the 3d model
     */
   private def modelBuild(): Unit = {
+    import collection.JavaConversions._
+    import collection.JavaConverters._
+    import sys.process._
     // first to run to get the act
-    def runAct = {
+    def runAct(dir: String) = {
       // config the commond to run libsfm
+      val first = 0.toString
+      val end = (Files.list(Paths.get(dir)).count() - 1).toString
+
+      Seq("TestLibSfM/x64/Release/TestLibSfM.exe",dir+"000.jpg",
+        "seq.act",first,end).!
     }
 
     // second to run to get the depth
-    def runDepth = {
-      // config the config.txt to run depth vdr
+    def runDepth(dir: String) = {
+      // change config file
+      val path = Paths.get("VDR_X64","config.txt")
+      val lines: Array[String] = Files.lines(path).iterator().toArray
+      val newProjectDir = dir + "/seq.act"
+      lines(0) = s"project_file $newProjectDir"
+      Files.write(path,lines.toIterable.asJava)
+
+      "VDR_X64/VideoDepthRecovery.exe".!
     }
 
     // three to run to get the model
-    def runModel = {
+    def runModel(dir: String) = {
       // config
     }
+
+    faces.foreach(face => {
+      val dir = imagedir + "/" + face
+
+      runAct(dir)
+      runDepth(dir)
+    })
+
+    println("receive image end and begin to build the model")
+  }
+
+  /**
+    * receive four int from the client
+    * @param input
+    * @return
+    */
+  def receiveSizes(input: SocketChannel): Array[Int] = {
+    val buffer = receiveSizeData(input,4 * 4)
+    Range(0,4).foldLeft(Array[Int]()) { (arrs, _) =>
+      arrs :+ buffer.getInt()
+    }
+  }
+
+  /**
+    * received size data from the client,and return the data
+    * @param input the client socket channel
+    * @param size the size want to read
+    * @return the data get from the client
+    */
+  def receiveSizeData(input: SocketChannel,size: Int): ByteBuffer = {
+    var readSize = 0;
+    val byteBuffer = ByteBuffer.allocate(size).order(ByteOrder.nativeOrder())
+
+    while(readSize != -1 && byteBuffer.hasRemaining){
+      readSize = input.read(byteBuffer)
+    }
+
+    byteBuffer.flip()
+    byteBuffer
   }
 
   /**
@@ -85,6 +149,10 @@ class ModelServer(port: Int,imageFoldPath: String) {
 
     var flag = true
     var imageIndex = 0
+
+    // try to get the different face size
+    imageFaceSizes = receiveSizes(input)
+
     while(flag){
       // try to get the data info
       val dataInfo = receiveDataInfo(input)
@@ -92,18 +160,8 @@ class ModelServer(port: Int,imageFoldPath: String) {
       val size = dataInfo._2
 
       if(flag){
-        // try to receive the size data and save it as a image file
-        val imageBuffer = ByteBuffer.allocate(size).order(ByteOrder.nativeOrder())
-        var revSize = 0;
-        while(size > revSize){
-          val readSize = input.read(imageBuffer)
-          println(s"now receive size $readSize total receive $revSize")
-          revSize += readSize
-        }
-
-        // create the image file
+        receiveData(input,size,imageIndex)
         imageIndex += 1
-        saveImage(imagedir,imageIndex,imageBuffer)
       }
     }
 
@@ -119,8 +177,9 @@ class ModelServer(port: Int,imageFoldPath: String) {
   private def receiveDataInfo(input: SocketChannel): (Boolean,Int) = {
     val byteBuffer = ByteBuffer.allocate(12).order(ByteOrder.nativeOrder())
 
-    while (byteBuffer.hasRemaining) {
-      input.read(byteBuffer)
+    var readSize = 0;
+    while (byteBuffer.hasRemaining && readSize != -1) {
+      readSize = input.read(byteBuffer)
     }
 
     byteBuffer.flip()
@@ -129,7 +188,6 @@ class ModelServer(port: Int,imageFoldPath: String) {
     if(size == -1) return (false,-1);
 
     val strBytes = Range(0, 5).foldLeft(Array[Byte]())((bytes, _) => {
-      println(bytes.size)
       bytes :+ byteBuffer.get()
     })
 
@@ -140,10 +198,40 @@ class ModelServer(port: Int,imageFoldPath: String) {
     (true,size)
   }
 
+  /**
+    * receive data from the client,and save the data to a image
+    * @param input the socketchannel
+    * @param size the size of the image
+    * @param imageIndex the index of the image
+    */
+  private def receiveData(input: SocketChannel,size: Int,imageIndex: Int): Unit ={
+    // try to receive the size data and save it as a image file
+    val imageBuffer = ByteBuffer.allocate(size).order(ByteOrder.nativeOrder())
+    var revSize = 0;
+    while(size > revSize){
+      val readSize = input.read(imageBuffer)
+      revSize += readSize
+      //println(s"now receive size $readSize total $revSize remain ${size - revSize}")
+    }
+
+    // create the image file
+    // check the directory and index to save the image
+    val (subdir,index) = checkDir(imageIndex)
+    saveImage(imagedir+"/" + subdir,index,imageBuffer)
+  }
+
+  private def checkDir(imageIndex: Int): (String,Int) = {
+    val sizes = (0 +: imageFaceSizes).scanLeft(0)((sum,num) => sum + num).drop(1)
+    val i = sizes.filter(_ < imageIndex+1).size
+    (faces(i-1),imageIndex - sizes(i-1))
+  }
+
 }
 
 object ModelServer{
   def main(args: Array[String]) {
+
+    println(Paths.get(".").toAbsolutePath.toString)
     val server = new ModelServer(9000,"./images")
 
     server.runserver()
