@@ -1,8 +1,12 @@
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.channels.{ServerSocketChannel, SocketChannel}
-import java.nio.file.{Files, Paths}
+import java.nio.file.{StandardOpenOption, Files, Paths}
 import java.nio.{ByteBuffer, ByteOrder}
+
+import org.opencv.core.{Size, Mat, Core}
+import org.opencv.imgcodecs.Imgcodecs
+import org.opencv.imgproc.Imgproc
 
 /**
   * Created by yang on 15-11-30.
@@ -23,6 +27,7 @@ class ModelServer(port: Int,imageFoldPath: String) {
     var flag = true
     while(flag){
       // wait for the socket to link in
+
       val socket = server.accept()
       println(s"have a link from ${socket.getLocalAddress.toString}")
 
@@ -56,8 +61,16 @@ class ModelServer(port: Int,imageFoldPath: String) {
 
   private def saveImage(imagedir: String,imageIndex: Int, imageBuffer: ByteBuffer) = {
     // try to get the imageIndex to 3 chars string
-    val imagePath = Paths.get(imagedir, f"$imageIndex%03d.jpg")
+    val imagePath = Paths.get(imagedir, f"$imageIndex%05d.jpg")
     Files.write(imagePath,imageBuffer.array())
+
+    // try to resize the image
+    val imageMat = Imgcodecs.imread(imagePath.toString)
+    val (width,height) = (imageMat.width()/2,imageMat.height()/2)
+    val dstMat = new Mat(width,height,imageMat.`type`())
+    Imgproc.resize(imageMat,dstMat,new Size(width,height))
+
+    Imgcodecs.imwrite(imagePath.toString,dstMat)
 
     println(s"save image $imageIndex well")
   }
@@ -69,6 +82,14 @@ class ModelServer(port: Int,imageFoldPath: String) {
     import collection.JavaConversions._
     import collection.JavaConverters._
     import sys.process._
+
+    def runTime(f: =>Unit): Double = {
+      val start = System.currentTimeMillis()
+      f
+      val end = System.currentTimeMillis()
+      (end - start)*1.0/1000
+    }
+
     // first to run to get the act
     def runAct(dir: String) = {
       // config the commond to run libsfm
@@ -76,7 +97,7 @@ class ModelServer(port: Int,imageFoldPath: String) {
       val step = 1.toString
       val end = (Files.list(Paths.get(dir)).count() - 1).toString
 
-      Process(Seq("TestLibSfM/x64/Release/TestLibSfM.exe", "../../../" + dir + "/000.jpg",
+      Process(Seq("TestLibSfM/x64/Release/TestLibSfM.exe", "../../../" + dir + "/00000.jpg",
         "seq.act", first, step, end), new File("TestLibSfM/x64/Release/")).!
     }
 
@@ -93,19 +114,36 @@ class ModelServer(port: Int,imageFoldPath: String) {
     }
 
     // three to run to get the model
-    def runModel(dir: String) = {
-      // config
+    def runModel = {
+      // change config file
+      val appdir = "MultiViewStitch"
+      val path = Paths.get("MultiViewStitch/imgPathList.txt")
+      val writer = Files.newBufferedWriter(path,StandardOpenOption.WRITE);
+      faces.foreach(face => {
+        writer.write(s"../$imagedir/$face/")
+        writer.newLine()
+      })
+      writer.flush()
+      writer.close()
+
+      // run the model rebuild
+      Process(Seq("MultiViewStitch/MultiViewStitch.exe","config.txt"),new File(appdir)).!
     }
     println("receive image end and begin to build the model")
 
+    var actTime = 0.0;
+    var depthTime = 0.0;
+
     faces.foreach(face => {
       val dir = imagedir + "/" + face
-      println(dir)
 
-      runAct(dir)
-      runDepth(dir)
+      actTime += runTime(runAct(dir))
+      depthTime += runTime(runDepth(dir))
     })
 
+    val modelTime = runTime(runModel)
+    println("get model end")
+    println(s"time usage: act time $actTime depth time $depthTime modelTime $modelTime")
   }
 
   /**
@@ -155,6 +193,7 @@ class ModelServer(port: Int,imageFoldPath: String) {
 
     // try to get the different face size
     imageFaceSizes = receiveSizes(input)
+
 
     while(flag){
       // try to get the data info
@@ -233,6 +272,8 @@ class ModelServer(port: Int,imageFoldPath: String) {
 
 object ModelServer{
   def main(args: Array[String]) {
+
+    System.loadLibrary(Core.NATIVE_LIBRARY_NAME)
 
     println(Paths.get(".").toAbsolutePath.toString)
     val server = new ModelServer(9000,"./images")

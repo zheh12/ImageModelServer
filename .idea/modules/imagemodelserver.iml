@@ -22,5 +22,6 @@
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="library" name="scala-sdk-2.11.7" level="application" />
+    <orderEntry type="library" name="opencv-300" level="project" />
   </component>
 </module>

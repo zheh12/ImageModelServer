@@ -1,3 +1,13 @@
 assembly
 explorer .
 assembly
+update
+assembly
+compile
+update
+compile
+exit
+sbt
+compile
+assembly
+exit
